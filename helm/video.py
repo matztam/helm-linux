@@ -1,16 +1,9 @@
-"""Play the chartplotter's video stream.
+"""Play the chartplotter's video stream (standard RTSP/H.264).
 
-The Helm feature streams the plotter screen as either:
-  * RTSP + RTP + H.264  (H264/90000 in the SDP) -- most units, or
-  * MJPEG over HTTP      -- some units (stream URL contains "mjpg").
-
-Both are standard, so we don't need to reimplement any codec: we hand the URL
-to a system player (mpv preferred, then ffplay, then vlc). ``play_embedded``
-renders into an existing X11 window id so the GUI can host the video.
-
-The stream URL normally comes from HelmDevice.getStreamUrl() over the control
-channel. Until the control channel is finalized, you can pass a URL you
-discovered (from a capture, or a TXT record) directly.
+The stream is standard, so we don't reimplement any codec: we hand the URL to a
+system player (mpv preferred, then ffplay, then vlc), forcing UDP transport
+(Garmin's RTSP server rejects TCP-interleaved). ``play_with_input`` launches mpv
+as the GUI's touch surface (see mpv_input.lua).
 """
 
 from __future__ import annotations
@@ -45,47 +38,19 @@ def _player() -> str | None:
     return None
 
 
-def build_command(
-    url: str,
-    player: str | None = None,
-    wid: int | None = None,
-    title: str = "Garmin Helm",
-    extra: list[str] | None = None,
-) -> list[str]:
-    """Build the player command line for ``url``.
-
-    ``wid`` embeds the video into an existing window (X11 window id) when the
-    player supports it (mpv, vlc). Raises RuntimeError if no player is found.
-    """
+def build_command(url: str, player: str | None = None,
+                  title: str = "Garmin Helm") -> list[str]:
+    """Build the player command line for ``url`` (raises if no player found)."""
     player = player or _player()
     if not player:
         raise RuntimeError(
-            "No video player found. Install one of: mpv, ffmpeg (ffplay), vlc."
-        )
-
+            "No video player found. Install one of: mpv, ffmpeg (ffplay), vlc.")
     if player == "mpv":
-        cmd = ["mpv", *_MPV_LOWLAT, f"--title={title}", "--force-window=yes"]
-        if wid is not None:
-            cmd.append(f"--wid={wid}")
-        cmd += (extra or [])
-        cmd.append(url)
-        return cmd
-
+        return ["mpv", *_MPV_LOWLAT, f"--title={title}", "--force-window=yes", url]
     if player == "ffplay":
-        cmd = ["ffplay", *_FFPLAY_LOWLAT, "-window_title", title]
-        # ffplay cannot embed into an arbitrary window id.
-        cmd += (extra or [])
-        cmd.append(url)
-        return cmd
-
+        return ["ffplay", *_FFPLAY_LOWLAT, "-window_title", title, url]
     if player == "vlc":
-        cmd = ["vlc", "--intf", "dummy", "--network-caching=100"]
-        if wid is not None:
-            cmd += ["--drawable-xid", str(wid)]
-        cmd += (extra or [])
-        cmd.append(url)
-        return cmd
-
+        return ["vlc", "--intf", "dummy", "--network-caching=100", url]
     raise RuntimeError(f"Unknown player: {player}")
 
 
@@ -94,19 +59,6 @@ def play(url: str, player: str | None = None, title: str = "Garmin Helm") -> int
     cmd = build_command(url, player=player, title=title)
     print("Running:", " ".join(cmd))
     return subprocess.call(cmd)
-
-
-def play_embedded(
-    url: str, wid: int, player: str | None = None, title: str = "Garmin Helm"
-) -> subprocess.Popen:
-    """Launch a player embedded in X11 window ``wid``; returns the Popen handle."""
-    player = player or _player()
-    if player == "ffplay":
-        player = "mpv" if shutil.which("mpv") else ("vlc" if shutil.which("vlc") else None)
-        if not player:
-            raise RuntimeError("Embedding needs mpv or vlc (ffplay can't embed).")
-    cmd = build_command(url, player=player, wid=wid, title=title)
-    return subprocess.Popen(cmd)
 
 
 def play_with_input(url: str, ipc_path: str, title: str = "Garmin Helm") -> subprocess.Popen:

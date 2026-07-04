@@ -56,6 +56,25 @@ def _frame(mtype: int, payload: bytes = b"") -> bytes:
     return struct.pack("<HHI", mtype, MAGIC, len(payload)) + payload
 
 
+def parse_frames(buf: bytes):
+    """Yield (type, payload) for each [u16 type][u16 0xBEEF][u32 len][payload]
+    frame in ``buf``. Resyncs to the next 0xBEEF marker on corruption."""
+    off, n = 0, len(buf)
+    while off + 8 <= n:
+        if int.from_bytes(buf[off + 2:off + 4], "little") != MAGIC:
+            nxt = buf.find(b"\xef\xbe", off + 1)
+            if nxt < 2:
+                break
+            off = nxt - 2
+            continue
+        mtype = int.from_bytes(buf[off:off + 2], "little")
+        length = int.from_bytes(buf[off + 4:off + 8], "little")
+        if off + 8 + length > n:
+            break
+        yield mtype, buf[off + 8:off + 8 + length]
+        off += 8 + length
+
+
 def encode_touch(ctx: bytes, x: float, y: float, down: bool) -> bytes:
     """Build a 0x164c touch payload. ``ctx`` = the 4-byte touch context id the
     plotter assigned (0x1645). x,y normalized [0,1] from the top-left."""
@@ -98,7 +117,6 @@ class HelmClient:
     def _await_context(self, timeout: float = 3.0):
         """Read frames until the plotter's 0x1645 assigns our touch id."""
         import time
-        from . import gmn2
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -110,7 +128,7 @@ class HelmClient:
                 break
             self._rxbuf.extend(chunk)
             consumed = 0
-            for typ, pl in gmn2.parse_helm_frames(bytes(self._rxbuf)):
+            for typ, pl in parse_frames(bytes(self._rxbuf)):
                 consumed += 8 + len(pl)
                 if typ == T_CONTEXT and len(pl) >= 8:
                     del self._rxbuf[:consumed]
@@ -174,8 +192,7 @@ if __name__ == "__main__":
     data = c.read(8192, timeout=2.0)
     print(f"  got {len(data)} bytes")
     if data:
-        from . import gmn2
-        for typ, pl in list(gmn2.parse_helm_frames(data))[:8]:
+        for typ, pl in list(parse_frames(data))[:8]:
             ap = "".join(chr(b) if 32 <= b < 127 else "." for b in pl[:48])
             print(f"    0x{typ:04x} len={len(pl)} {pl[:40].hex()} {ap}")
     print(f"\nvideo: {c.rtsp_url}")

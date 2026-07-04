@@ -1,153 +1,121 @@
-# Garmin ActiveCaptain "Helm" — reverse-engineered protocol notes
+# Garmin ActiveCaptain "Helm" — protocol notes
 
-These notes come from static analysis of the ActiveCaptain Android app
-(`com.garmin.android.marine`, v36.0.2694): the decompiled Java (`classes.dex`
-via jadx) and string/symbol analysis of the native core `libgmm.so` (81 MB,
-"Garmin Mobile Marine"). No device traffic was captured. Anything marked
-**(confirmed)** is directly evidenced; **(inferred)** is a best hypothesis to
-validate against a real plotter.
+Reverse-engineered from the ActiveCaptain Android app and verified against a
+**GPSMAP 923xsv**. This documents the wire protocol the tool implements. It was
+recovered by static analysis of the app's native core (`libgmm.so`) plus one
+packet capture of a live Helm session.
 
-## Architecture overview
+Three independent channels, all over the plotter's own Wi‑Fi (default gateway
+`172.16.6.0`):
 
-The whole Helm stack is native (C/C++) in `libgmm.so`, under
-`apprepo/lib/marine-mobile-core/`. The Java classes are thin JNI shims:
+| Channel | Transport | Purpose |
+|---|---|---|
+| Discovery | mDNS | find the plotter and its services |
+| Pairing | HTTP (port 80) | register this device as an allowed user |
+| Helm session | TCP `:51200` | device info, video URL, touch input |
+| Video | RTSP/RTP `:554` | H.264 screen stream |
 
-| Java class | Role |
-|---|---|
-| `com.garmin.android.gmm.HelmClientManager` | keys/touches, device/station enumeration |
-| `com.garmin.android.gmm.RtspClient` | video stream client (native RTSP) |
-| `com.garmin.android.gmm.OneHelmManager` | "OneHelm" web-app servers |
-| `com.garmin.android.gmm.objects.HelmDevice` | one plotter: id, name, `streamUrl`, aspect ratio, rotation, `KeyConfig`, screenshot |
-| `com.garmin.android.marine.helm.HelmStreamingActivity` | the on-phone screen: video + on-screen keys/touch |
+## 1. Discovery (mDNS)
 
-Native subsystem doing the work: **VCM = "Vessel Connect Manager"**
-(`msl/vcm/…`). Key files seen in embedded build paths:
+The plotter advertises several `_garmin-*._tcp` services. The relevant ones:
+
+- `_garmin-helm._tcp` (port **51200**, TXT `version`) — the Helm session.
+- `_garmin-bl-id._tcp` (port **80**, TXT `tag`, `hasDisplay`, `version`) — the
+  on-board HTTP identity server used for pairing.
+
+Implemented in `helm/discovery.py` (pure-Python mDNS, no dependencies).
+
+## 2. Pairing (HTTP, port 80)
+
+The plotter's on-board HTTP server (nginx) authorizes clients by "bl-id"
+(BlueLink id) registration:
+
+1. **Register:** `PUT /garmin/bl-ids/<tag>` with body = protobuf
+   `CSM.Proto.Common.MobileDeviceIdentity`:
+   ```proto
+   required string device_identifier   = 1;   // a UUID
+   required uint32 client_generated_token = 2; // a random nonce
+   optional string device_name         = 3;   // shown on the plotter screen
+   ```
+   `Content-Type: application/octet-stream`. The `<tag>` in the URL is
+   `base64(client_generated_token[4 bytes little-endian] + 0x02 0x01 0x00 0x00)`
+   with `=` padding stripped. Response is **202**, and the plotter displays
+   *"a new ActiveCaptain user was added"*.
+2. **Set role:** `PUT /garmin/bl-ids/<tag>/set-role` with JSON
+   `{"role": "guest"|"owner"|"dealer"}`.
+3. **Permission (manual):** on the plotter, set the **global** App-permission to
+   **View and Control** (Settings → Communications → Wi‑Fi Network → Wi‑Fi
+   Devices). This is a single global setting, not per-user.
+
+There is no separate token to fetch — the Helm session is authorized by the
+registering client's identity/address. (`/garmin/credentials/` is Wi‑Fi network
+credentials, unrelated. `/Authentication/generate-token` is a cloud/account path
+not used for the direct-to-plotter case.)
+
+Implemented in `helm/credential.py`. Identity is persisted in
+`helm-identity.json` and reused.
+
+## 3. Helm session (TCP :51200)
+
+Binary message framing:
 
 ```
-msl/vcm/client/service-discovery/vcm_service_discovery.c   <- mDNS browse
-msl/vcm/client/service-discovery/vcm_service_connection.c   <- TCP session setup
-msl/vcm/client/helm/vcm_helm_state.c                        <- Helm state machine
-msl/vcm/client/rest/vcm_http_client.c / vcm_rest_client.c   <- HTTP/JSON API
-msl/vcm/Auth/*  (Jwt.cpp, JwtManager.cpp, RefreshJwt.cpp…)   <- JWT auth
-gmm/RtspClient.cpp                                           <- video
-msl/modules/rtp-payloads/h264/rtp_h264_depacketize.c        <- H.264 over RTP
+[u16 type LE][u16 0xBEEF][u32 length LE][payload]
 ```
 
-## 1. Discovery — mDNS / Bonjour  **(confirmed)**
+`0xBEEF` is a constant marker (`helm/helm_client.py:parse_frames`).
 
-The app embeds Apple mDNSResponder and browses these service types:
+### Handshake (client → plotter)
+
+| type | payload | meaning |
+|---|---|---|
+| `0x083f` | `0x9531` (u16) | hello / protocol tag |
+| `0x0aa9` | 8 bytes | session token — client-chosen random |
+| `0x1648` | u32 index | device select (`0x0b`) + data subscriptions |
+| `0x1644` | *(empty)* | request a touch context |
+
+The plotter replies `0x1645` = `[u32 1][u32 ctx_id]`. **`ctx_id` must be used as
+the first 4 bytes of every touch message** — it is assigned by the plotter, not
+chosen by the client.
+
+### Plotter → client
+
+`0x1649` events wrap `[u32 subtype][u32 length][data]`: subtype 0 = the RTSP
+stream URL, subtype 1 = inline H.264, plus the device name (`"GPSMAP 923"`).
+
+### Touch input (client → plotter), type `0x164c`, 24 bytes
 
 ```
-_garmin-helm._tcp      <- Helm remote view/control  (the one we want)
-_garmin-bl-app._tcp    <- BlueLink app messaging bus
-_garmin-marine._udp    <- marine network announce
-_garmin-mrn-html._tcp  <- on-device HTML/web UI ("OneHelm")
-_garmin-swifi._tcp, _garmin-mrn-card._tcp, _garmin-mrn-cred._tcp, …
+[u32 ctx_id][u32 1][u8 0][u32 x][u32 y][u32 down][pad×3]
 ```
 
-Native log format strings prove the record shape:
+`x`, `y` are normalized screen coordinates in 16.16 fixed point
+(`round(norm * 65536)`), from the top-left. `down`: 1 = press/move, 0 = release.
+A drag is `down` … many moving `down` … final `up`.
 
-```
-"Helm service added: %s %s:%d version: %d"   -> name, host/ip, port, protocol version
-"Helm service address changed: %s %s"
-"Helm service remove: %s"
-```
+Hardware **keys** were not in the capture, so their message format is unknown;
+the key enum is preserved in `helm/keys.py` for future work. A touchscreen unit
+is fully controllable by touch.
 
-So each Helm plotter advertises **name, host, IPv4, TCP port, and a version**
-in its SRV/TXT records. → Implemented in `helm/discovery.py` (pure-Python mDNS,
-no deps; falls back to `zeroconf` if installed).
+## 4. Video (RTSP, port 554)
 
-## 2. Video — RTSP + RTP + H.264 (or MJPEG)  **(confirmed)**
+`rtsp://<plotter-host>:554/helm_1280x720.h264` — standard RTSP; the SDP is
+`m=video RTP/AVP 96`, `H264/90000`, `packetization-mode=1`. The server only
+supports **UDP** transport (`RTP/AVP/UDP`); requesting TCP-interleaved returns
+`461 Unsupported transport`. Any standard player works (`helm/video.py` uses
+mpv/ffplay/vlc with `--rtsp-transport=udp`).
 
-`RtspClient` connects to `HelmDevice.getStreamUrl()`. Evidence it's standard
-RTSP: strings `DESCRIBE`, `Accept: application/sdp`, `H264/90000`,
-`h264-depacketize`, `All streams setup, starting play on client`,
-`avc1`, `H.264`.
+## Reproducing / extending
 
-Two stream flavours:
-* **H.264 over RTP/RTSP** — the default. `rtp_h264_depacketize.c` reassembles
-  NAL units.
-* **MJPEG** — some units. The app checks `if streamUrl contains "mjpg"` in
-  `HelmStreamingActivity` to toggle the record-to-file menu item.
+`helm/analyze.py` decodes a captured session pcap into the frames above
+(`python3 -m helm.analyze helm.pcap --port 51200`) — useful for adding key
+support or supporting other units. Capture the phone↔plotter traffic with
+PCAPdroid (root mode, so mDNS works) or `tcpdump` where you can see it. Because
+Wi‑Fi unicast can't be sniffed passively from another station, an on-path
+capture (rooted phone, or ARP redirection on your own network) is required.
 
-Both are decodable by any standard player. → `helm/video.py` shells out to
-mpv/ffplay/vlc; `helm/control.py:RtspProbe` does a pure-Python OPTIONS+DESCRIBE
-to fetch the SDP and confirm the codec / exact media URL.
+## Legal
 
-**Open item:** where `streamUrl` comes from. It is a field on `HelmDevice`,
-populated natively — most likely returned by the control session (step 3) or
-derivable from the mDNS host + a fixed path. Capture (step 4) resolves this; in
-the meantime you can pass any RTSP URL you observe directly to `view`.
-
-## 3. Control — keys & touches  **(model confirmed, transport inferred)**
-
-`HelmClientManager` native methods:
-
-```java
-nativeSendKeys(long deviceId, ArrayList<HelmKey> keys)
-nativeSendTouches(long deviceId, ArrayList<HelmTouch> touches)
-nativeSetActiveDevice(long deviceId)
-nativeControlAllowed() / nativeViewAllowed()
-```
-
-### Keys — **confirmed model**
-`HelmKey` is an ordinal enum (wire value = position). Full list in
-`helm/keys.py`. Highlights: `HLM_KEY_ZOOM_IN=1`, `ZOOM_OUT=2`, `DIR_UP=3`,
-`DIR_DOWN=4`, `DIR_LEFT=5`, `DIR_RIGHT=6`, `SELECT=7`, `BACK=8`, `MENU=9`,
-`HOME=10`, `MARK=11`, soft keys 1–8 (12–19), numeric pad (20–31), knob
-left/right/push (34–36), presets 1–4 (37–40).
-
-A device reports its physical layout via `HelmDevice.KeyConfig`
-(`HLM_KEY_CFG_NONE`=touch-only … `HLM_KEY_CFG_4`).
-
-### Touches — **confirmed model**
-`HelmClientManager.HelmTouch(trackId, float x, float y, boolean down)` stores
-`x = (int)(x * 65536)`, `y = (int)(y * 65536)` — i.e. **normalized [0,1] screen
-coordinates in 16.16 fixed point** (`TOUCH_UNITY = 65536`). `trackId` groups a
-multi-touch gesture; `down` = press/move vs release.
-
-### Transport — **inferred, needs capture**
-This is the one unresolved piece. The keys/touches are dispatched through the
-VCM app-bus after an **authenticated** session:
-
-* Discovery gives a TCP `host:port` for `_garmin-helm._tcp`.
-* `vcm_service_connection.c` opens a session; native log
-  `"Cannot setup new client local app_id %d to %s:%u remote app_id %u"` shows an
-  **app-id-addressed message bus** (Garmin BlueLink-style), not plain HTTP for
-  input.
-* Auth is **JWT** (`msl/vcm/Auth/*`: `GenerateJwt`, `RefreshJwt`, `SeedJwt`,
-  `JwtMiddleware`). There is a REST/JSON layer (`vcm_rest_client.c`,
-  `vcm_rest_json.c`) used for some VCM operations, and a JSON snippet
-  `Return value is in JSON format: { "x": "200", "y": "300" }` suggests some
-  coordinate calls are JSON — but the high-rate touch/key path is more likely a
-  compact binary bus message.
-
-The exact framing (message header, app-id values, whether keys/touches are JSON
-over REST or binary bus frames, and the JWT/pairing handshake) is **not
-recoverable from static strings** and must be observed on a live device.
-
-## 4. Finalizing the control channel
-
-1. Laptop + phone on the plotter's WiFi.
-2. `python -m helm.capture --host <plotter-ip>` (or `sudo tcpdump -w helm.pcap
-   host <plotter-ip>`).
-3. In the app: open Helm, press keys, tap the screen.
-4. In Wireshark, find the non-RTSP TCP stream that lights up on input. Identify:
-   * the session/auth handshake (look for a JWT — a `eyJ…` base64 blob),
-   * the per-key and per-touch frame layout (expect the fixed-point coords
-     `x*65536`, `y*65536`, the `HelmKey` ordinal, and the `down` flag),
-   * the port (the mDNS-advertised Helm port).
-5. Encode that framing in a new `Transport` subclass in `helm/control.py`
-   (replacing `CaptureNeededTransport`). The semantic layer (`HelmControlClient`,
-   `HelmKey`, `HelmTouch`) is already correct, so only the byte-packing/handshake
-   is left.
-
-`helm/control.py` ships two starting points: `CaptureNeededTransport` (default —
-prints the semantic payload and how to capture) and
-`RtspSetParameterTransport` (an experimental "control over RTSP SET_PARAMETER"
-hypothesis to try and confirm or discard).
-
-## Legal / usage note
-For your own device on your own network. This is interoperability reverse
-engineering of a protocol Garmin does not publish; no Garmin code is reused —
-only the observable protocol behavior is reimplemented.
+Interoperability reverse engineering for use with your own hardware on your own
+network. No Garmin code is included — only the observable protocol behavior is
+reimplemented. Not affiliated with or endorsed by Garmin.

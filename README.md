@@ -1,109 +1,92 @@
 # garmin-helm-linux
 
-A Linux alternative to the **Helm** feature of the Garmin ActiveCaptain phone
-app — live-view and control your Garmin chartplotter screen from a Linux laptop
-over WiFi.
+A Linux client for the **Helm** feature of Garmin ActiveCaptain — live-view and
+**control your Garmin chartplotter's screen from a Linux laptop** over Wi‑Fi,
+without the phone app.
 
-Built by reverse-engineering the ActiveCaptain APK. See **[PROTOCOL.md](PROTOCOL.md)**
-for how it works and what's confirmed vs. still needs a live capture.
+Reverse-engineered from the ActiveCaptain app and verified against a **GPSMAP
+923xsv**. See [PROTOCOL.md](PROTOCOL.md) for the wire protocol.
 
-## Status at a glance
+> Not affiliated with or endorsed by Garmin. For use with your own hardware on
+> your own network.
 
-| Feature | Works? | Notes |
-|---|---|---|
-| **Discover plotters** (mDNS) | ✅ | pure-Python, no deps |
-| **Pair** this machine with the plotter | ✅ | `helm-cli.py pair` (registers a bl-id) |
-| **View screen** (RTSP H.264) | ✅ | `rtsp://<host>:554/helm_1280x720.h264` via mpv |
-| **Touch control** (click/drag) | ✅ | full 0xBEEF/0x164c session protocol, RE'd from capture |
-| **Hardware keys** (zoom/menu buttons) | 🚧 | message type not yet captured; touchscreen units don't need it |
+## What works
 
-The whole path is reverse-engineered and implemented: mDNS discovery → bl-id
-pairing (HTTP) → the `:51200` Helm session (`[type][0xBEEF][len][payload]`
-framing, handshake, and `0x164c` touch messages) → RTSP/H.264 video. See
-**[PROTOCOL.md](PROTOCOL.md)** and **[PAIRING.md](PAIRING.md)**.
+- **Discovery** of the plotter over mDNS.
+- **Pairing** — registers this machine as an ActiveCaptain user on the plotter.
+- **Live video** — the chartplotter screen as RTSP/H.264.
+- **Touch control** — click = tap, click‑and‑drag = pan, over the real session
+  protocol (verified byte-for-byte against a capture).
 
-### Quick start
-```bash
-python3 helm-cli.py pair      # one-time: register this machine (accept on plotter if prompted)
-python3 helm-gui.py           # small control panel + a video window you touch
-# or headless video only:
-python3 helm-cli.py helm      # opens the session and plays the video
-```
-On the plotter, set the global **App permissions** to **View and Control**.
-
-In the GUI, interact with the **video window**: click = tap, click-and-drag =
-pan/swipe. (Requires **mpv**; input is bridged from the mpv window over its IPC
-socket, so it works on Wayland and X11 without window embedding.)
+Hardware keys (zoom/menu buttons) aren't implemented — a touchscreen unit is
+fully controllable by touch; see [PROTOCOL.md](PROTOCOL.md) for how to add them.
 
 ## Requirements
 
-* Python 3.10+ (standard library only for discovery/probe/control)
-* A video player: **mpv** (recommended), or ffmpeg's ffplay, or vlc
-* Optional: `zeroconf` (`pip install zeroconf`) for more robust discovery
-* Optional: `tcpdump` + Wireshark to finalize the control channel
-
-Everything here is self-contained; no build step.
+- Python 3.10+ (standard library only — no pip packages required)
+- **mpv** (recommended; required for the GUI's touch input). `ffplay` or `vlc`
+  also work for view-only.
+- Optionally `zeroconf` for more robust discovery on busy networks.
 
 ## Usage
 
-Join the plotter's WiFi first (the network the chartplotter broadcasts, or a
-shared boat network).
+Join the chartplotter's Wi‑Fi network, then:
 
 ```bash
-# 1. Find your plotter
-python3 helm-cli.py discover
-#   -> GPSMAP 1243xsv   address: 192.168.1.50:9000   rtsp: rtsp://192.168.1.50:554/...
+# 1. one-time: register this machine with the plotter
+python3 helm-cli.py pair
+#    -> the plotter shows "a new ActiveCaptain user was added"
+#    On the plotter, set App permissions to "View and Control"
+#    (Settings -> Communications -> Wi-Fi Network -> Wi-Fi Devices)
 
-# See every Garmin service on the network
-python3 helm-cli.py discover --all
-
-# 2. Inspect the video stream (confirm codec / exact URL)
-python3 helm-cli.py probe rtsp://192.168.1.50:554/helm
-
-# 3. Watch the screen
-python3 helm-cli.py view rtsp://192.168.1.50:554/helm
-
-# 4. Full GUI: live video + on-screen keys + click-to-touch
-python3 helm-gui.py --host 192.168.1.50 --url rtsp://192.168.1.50:554/helm
-#   (or just run it and click "Discover")
+# 2. live screen + touch control
+python3 helm-gui.py
+#    A small control panel opens plus an mpv video window.
+#    Interact with the VIDEO window: click = tap, click-and-drag = pan.
 ```
 
-### GUI controls
-* Click/drag on the video = touch/drag on the plotter.
-* On-screen buttons and keyboard shortcuts send Helm keys:
-  arrows = pan, `+`/`-` = zoom, Enter = select, Esc/Backspace = back,
-  `m` = menu, `h` = home, `k` = mark.
-
-## Finalizing key/touch control
-
-The keys/touches are modeled correctly (`helm/keys.py`), but the byte framing of
-Garmin's VCM control bus needs one observation from a real device:
+Headless / view-only:
 
 ```bash
-# with the phone app actively controlling the plotter:
-python3 -m helm.capture --host 192.168.1.50
-#   -> writes helm.pcap; open in Wireshark, find the input stream
+python3 helm-cli.py discover        # find the plotter
+python3 helm-cli.py helm            # open the session and play the video
+python3 helm-cli.py helm --no-video # session only (prints status/stream URL)
 ```
 
-Then implement the observed framing in a `Transport` subclass in
-`helm/control.py` (the default `CaptureNeededTransport` explains exactly what to
-look for). Full walkthrough in [PROTOCOL.md](PROTOCOL.md) §4.
+## Commands
 
-## Project layout
+| Command | Description |
+|---|---|
+| `helm-cli.py discover [--all]` | find Helm devices (or all Garmin services) |
+| `helm-cli.py pair [--role guest\|owner] [--reset]` | register this machine |
+| `helm-cli.py helm [--host IP] [--tap X Y]` | open session + play video |
+| `helm-cli.py view <url>` | play any RTSP/MJPEG stream |
+| `helm-cli.py analyze <pcap>` | decode a captured Helm session |
+| `helm-gui.py` | GUI: video window + touch control |
+
+## How it fits together
 
 ```
-helm-cli.py          CLI: discover / probe / view / key / tap / capture
-helm-gui.py          tkinter GUI: video + keypad + touch
-helm/
-  discovery.py       mDNS browse for _garmin-helm._tcp (pure Python)
-  video.py           RTSP/MJPEG playback via mpv/ffplay/vlc
-  keys.py            HelmKey enum + HelmTouch model (from the app)
-  control.py         RTSP probe + pluggable control transport
-  capture.py         traffic-capture helper to finalize control
-PROTOCOL.md          reverse-engineering write-up
+mDNS discover ─▶ pair (HTTP :80, bl-id register) ─▶ Helm session (TCP :51200)
+                                                     ├─ handshake + touch input
+                                                     └─ RTSP URL ─▶ video (:554)
 ```
 
-## Legal
+- `helm/discovery.py` — mDNS browser
+- `helm/credential.py` — pairing (bl-id registration)
+- `helm/helm_client.py` — the `:51200` session: framing, handshake, touch
+- `helm/video.py` + `helm/mpv_input.lua` — RTSP playback and the mpv→touch bridge
+- `helm/analyze.py` — decode a session pcap (for extending the protocol)
+- `helm/inputtest.py` — test the mouse→touch bridge without a plotter
+- `helm/keys.py` — reverse-engineered key enum (reference; not wired up)
 
-For interoperability with your own hardware on your own network. No Garmin code
-is included; only observable protocol behavior is reimplemented.
+## Notes
+
+- Touch input in the GUI is bridged from the mpv window over its IPC socket, so
+  it works on Wayland and X11 without embedding. mpv runs with
+  `--window-dragging=no` so click‑drag pans instead of moving the window.
+- The plotter's RTSP server is UDP-only; the players are configured accordingly.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

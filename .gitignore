@@ -1,0 +1,13 @@
+# local device identity (created by `pair`) — do not commit
+helm-identity.json
+
+# captures / logs / runtime artifacts
+*.pcap
+*.pcapng
+*.log
+*.sock
+*.bin
+
+__pycache__/
+*.pyc
+.venv/

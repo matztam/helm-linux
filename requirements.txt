@@ -1,11 +1,9 @@
-# garmin-helm-linux has NO required Python dependencies (stdlib only).
-# Optional extras for a better experience:
-
-# More robust mDNS discovery (otherwise a built-in pure-Python browser is used):
-zeroconf>=0.130
-
-# System packages (install via your distro, not pip) you also want:
-#   mpv            recommended video player (best embedding + low latency)
-#   ffmpeg         provides ffplay as a fallback player
-#   vlc            alternative player
-#   tcpdump        to capture control traffic and finalize keys/touches
+# garmin-helm-linux has NO required Python packages (standard library only).
+#
+# Optional:
+#   zeroconf>=0.130   # more robust mDNS discovery on busy networks
+#
+# System packages (install via your distro, not pip):
+#   mpv     recommended player; REQUIRED for the GUI's touch input
+#   ffmpeg  provides ffplay (view-only fallback)
+#   vlc     alternative player (view-only)

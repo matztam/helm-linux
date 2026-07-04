@@ -1,10 +1,10 @@
-"""Helm key and touch model, transcribed exactly from the Garmin app.
+"""Reverse-engineered Helm hardware-key reference.
 
-Source: com.garmin.android.gmm.HelmClientManager (decompiled from classes.dex).
-The ``HelmKey`` enum is ordinal-encoded: the wire value of each key is its
-position in this list (HLM_KEY_INVALID == 0). Only a subset is meaningful on
-any given plotter; the device advertises its layout via HelmDevice.KeyConfig
-(HLM_KEY_CFG_NONE..HLM_KEY_CFG_4). Touch-only units report HLM_KEY_CFG_NONE.
+NOTE: keys are not wired into the client yet — the captured session only
+contained touch input, so the key *message* format is not yet known. This
+module preserves the key enums (from the app's HelmClientManager) for whoever
+adds key support after capturing a session with a few button presses. The
+touch model that IS implemented lives in helm_client.py.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ import enum
 
 
 class HelmKey(enum.IntEnum):
-    """Physical/soft keys, in the exact ordinal order used by the native code."""
+    """Physical/soft keys, in the ordinal order used by the app (wire value =
+    position; only a subset exists on any given plotter)."""
 
     HLM_KEY_INVALID = 0
     HLM_KEY_ZOOM_IN = 1
@@ -56,7 +57,6 @@ class HelmKey(enum.IntEnum):
     HLM_KEY_PRESET_2 = 38
     HLM_KEY_PRESET_3 = 39
     HLM_KEY_PRESET_4 = 40
-    HLM_KEY_COUNT = 41
 
 
 class KeyConfig(enum.IntEnum):
@@ -67,65 +67,3 @@ class KeyConfig(enum.IntEnum):
     HLM_KEY_CFG_2 = 2
     HLM_KEY_CFG_3 = 3
     HLM_KEY_CFG_4 = 4
-    HLM_KEY_CONFIGURATION_COUNT = 5
-
-
-# TOUCH_UNITY from HelmClientManager.HelmTouch: normalized [0,1] screen
-# coordinates are multiplied by this to produce 16.16 fixed-point integers.
-TOUCH_UNITY = 65536
-
-
-class HelmTouch:
-    """A single touch point, matching HelmClientManager.HelmTouch.
-
-    x/y are normalized floats in [0.0, 1.0] measured from the top-left of the
-    plotter screen. ``track_id`` groups points of a multi-touch gesture; ``down``
-    is True for press/move and False for release.
-    """
-
-    __slots__ = ("track_id", "x", "y", "down")
-
-    def __init__(self, track_id: int, x: float, y: float, down: bool):
-        self.track_id = int(track_id)
-        self.x = float(x)
-        self.y = float(y)
-        self.down = bool(down)
-
-    @property
-    def fixed_x(self) -> int:
-        return int(self.x * TOUCH_UNITY)
-
-    @property
-    def fixed_y(self) -> int:
-        return int(self.y * TOUCH_UNITY)
-
-    def as_dict(self) -> dict:
-        return {
-            "trackId": self.track_id,
-            "x": self.fixed_x,
-            "y": self.fixed_y,
-            "down": self.down,
-        }
-
-    def __repr__(self) -> str:
-        state = "down" if self.down else "up"
-        return f"HelmTouch(id={self.track_id}, {self.x:.3f},{self.y:.3f} {state})"
-
-
-# Convenience: map common keyboard keys to Helm keys for the GUI/CLI.
-KEYBOARD_MAP = {
-    "plus": HelmKey.HLM_KEY_ZOOM_IN,
-    "equal": HelmKey.HLM_KEY_ZOOM_IN,
-    "minus": HelmKey.HLM_KEY_ZOOM_OUT,
-    "Up": HelmKey.HLM_KEY_DIR_UP,
-    "Down": HelmKey.HLM_KEY_DIR_DOWN,
-    "Left": HelmKey.HLM_KEY_DIR_LEFT,
-    "Right": HelmKey.HLM_KEY_DIR_RIGHT,
-    "Return": HelmKey.HLM_KEY_SELECT,
-    "space": HelmKey.HLM_KEY_SELECT,
-    "BackSpace": HelmKey.HLM_KEY_BACK,
-    "Escape": HelmKey.HLM_KEY_BACK,
-    "m": HelmKey.HLM_KEY_MENU,
-    "h": HelmKey.HLM_KEY_HOME,
-    "k": HelmKey.HLM_KEY_MARK,
-}
