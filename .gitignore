@@ -1,5 +1,6 @@
-# local device identity (created by `pair`) — do not commit
+# local device identity (created by `pair`) and GUI settings — do not commit
 helm-identity.json
+helm-gui.json
 
 # captures / logs / runtime artifacts
 *.pcap

@@ -1,6 +1,7 @@
 -- mpv input bridge for garmin-helm-linux.
--- Emits the mouse position over the video as script-messages that the GUI reads
--- via the JSON IPC socket:  "helm_touch <down|move|up> <nx> <ny>"
+-- Emits pointer input over the JSON IPC socket as script-messages:
+--   "helm_touch  <down|move|up> <nx> <ny>"   (click / drag -> tap / pan)
+--   "helm_scroll <up|down>      <nx> <ny>"   (wheel -> pinch zoom in / out)
 -- nx,ny are normalized [0,1] within the actual video rectangle (letterbox aware).
 
 local dragging = false
@@ -41,3 +42,17 @@ mp.add_key_binding("MBTN_LEFT", "helm_mbtn_left", function(e)
         emit("up")
     end
 end, { complex = true })
+
+-- scroll wheel -> zoom (pinch). Both wheel and precise-scroll names are bound.
+local function scroll(dir)
+    local nx, ny = norm()
+    if not nx then return end
+    mp.commandv("script-message", "helm_scroll", dir,
+                string.format("%.5f", nx), string.format("%.5f", ny))
+end
+for _, k in ipairs({ "WHEEL_UP", "AXIS_UP" }) do
+    mp.add_key_binding(k, "helm_" .. k, function() scroll("up") end)
+end
+for _, k in ipairs({ "WHEEL_DOWN", "AXIS_DOWN" }) do
+    mp.add_key_binding(k, "helm_" .. k, function() scroll("down") end)
+end

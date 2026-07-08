@@ -41,8 +41,12 @@ python3 helm-cli.py pair
 
 # 2. live screen + touch control
 python3 helm-gui.py
-#    A small control panel opens plus an mpv video window.
-#    Interact with the VIDEO window: click = tap, click-and-drag = pan.
+#    Auto-discovers and connects on launch (remembers the last plotter; shows a
+#    picker if several are found). A control panel opens plus an mpv video window.
+#    Interact with the VIDEO window:
+#      click            = tap
+#      click-and-drag   = pan
+#      scroll wheel     = zoom in / out (two-finger pinch)
 ```
 
 Headless / view-only:
@@ -86,6 +90,9 @@ mDNS discover ─▶ pair (HTTP :80, bl-id register) ─▶ Helm session (TCP :5
   it works on Wayland and X11 without embedding. mpv runs with
   `--window-dragging=no` so click‑drag pans instead of moving the window.
 - The plotter's RTSP server is UDP-only; the players are configured accordingly.
+- If the video player crashes (corrupt frames, decoder hiccups), it is
+  **relaunched automatically** — the Helm session and touch control keep running
+  across the restart. Closing the video window on purpose (clean quit) stops it.
 
 ## License
 

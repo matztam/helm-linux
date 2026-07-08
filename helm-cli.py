@@ -54,6 +54,11 @@ def cmd_helm(args) -> int:
         if not svcs:
             print("No Helm device found. Join the plotter's Wi-Fi.")
             return 1
+        if len(svcs) > 1:
+            print("Multiple plotters found — pick one with --host <ip>:")
+            for s in svcs:
+                print(f"  {s.name}  ->  --host {s.address or s.host}")
+            return 1
         host = svcs[0].address or svcs[0].host
         print(f"Found {svcs[0].name} at {host}")
     client = HelmClient(host)
@@ -72,7 +77,7 @@ def cmd_helm(args) -> int:
     if args.no_video:
         client.close()
         return 0
-    rc = video.play(client.rtsp_url, title="Garmin Helm")
+    rc = video.play_supervised(client.rtsp_url, title="Garmin Helm")
     client.close()
     return rc
 

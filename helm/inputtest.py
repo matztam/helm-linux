@@ -84,6 +84,9 @@ def main() -> int:
                     moved = "" if last is None else f"  Δ=({nx-last[0]:+.3f},{ny-last[1]:+.3f})"
                     print(f"  {state:4}  nx={nx:.3f} ny={ny:.3f}{moved}")
                     last = (nx, ny)
+                elif len(a) == 4 and a[0] == "helm_scroll":
+                    print(f"  SCROLL {a[1]:4}  nx={float(a[2]):.3f} ny={float(a[3]):.3f}"
+                          f"  -> zoom {'in' if a[1]=='up' else 'out'}")
     except KeyboardInterrupt:
         pass
     finally:

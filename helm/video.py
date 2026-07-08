@@ -61,6 +61,28 @@ def play(url: str, player: str | None = None, title: str = "Garmin Helm") -> int
     return subprocess.call(cmd)
 
 
+def play_supervised(url: str, player: str | None = None,
+                    title: str = "Garmin Helm") -> int:
+    """Play ``url``, relaunching the player if it crashes (non-zero exit).
+    A clean quit (exit 0) or Ctrl-C stops. Returns the last exit code."""
+    import time
+    backoff = 0.5
+    while True:
+        started = time.monotonic()
+        try:
+            rc = play(url, player=player, title=title)
+        except KeyboardInterrupt:
+            return 0
+        if rc == 0:
+            return 0
+        backoff = 0.5 if time.monotonic() - started > 8 else min(backoff * 2, 5.0)
+        print(f"player exited ({rc}); restarting in {backoff:.0f}s… (Ctrl-C to stop)")
+        try:
+            time.sleep(backoff)
+        except KeyboardInterrupt:
+            return 0
+
+
 def play_with_input(url: str, ipc_path: str, title: str = "Garmin Helm") -> subprocess.Popen:
     """Launch mpv as the video + touch surface: it serves a JSON IPC socket at
     ``ipc_path`` and loads mpv_input.lua, which reports mouse events over it.

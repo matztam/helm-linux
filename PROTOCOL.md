@@ -83,15 +83,29 @@ chosen by the client.
 `0x1649` events wrap `[u32 subtype][u32 length][data]`: subtype 0 = the RTSP
 stream URL, subtype 1 = inline H.264, plus the device name (`"GPSMAP 923"`).
 
-### Touch input (client → plotter), type `0x164c`, 24 bytes
+### Touch input (client → plotter), type `0x164c`
 
 ```
-[u32 ctx_id][u32 1][u8 0][u32 x][u32 y][u32 down][pad×3]
+[u32 ctx_id][u32 count][ point × count ]
+point = [u8 track_id][u32 x][u32 y][u32 down][pad×3]   (16 bytes)
 ```
 
-`x`, `y` are normalized screen coordinates in 16.16 fixed point
-(`round(norm * 65536)`), from the top-left. `down`: 1 = press/move, 0 = release.
-A drag is `down` … many moving `down` … final `up`.
+`ctx_id` is the context the plotter assigned (`0x1645`). `x`, `y` are normalized
+screen coordinates in 16.16 fixed point (`round(norm * 65536)`), from the
+top-left. `down`: 1 = press/move, 0 = release. A single-finger message is
+`count=1`, `track_id=0` (24 bytes). A drag is `down` … moving `down` … final
+`up`.
+
+**Multi-touch (confirmed from a pinch capture):** a two-finger message is
+`count=2` with this exact 40-byte layout (fingers `track_id` 0 and 1):
+
+```
+[ctx:4][count=2:4] 00 [x0:4][y0:4][down0:1] 01 00 00 00 [x1:4][y1:4][down1:1] 00×9
+```
+
+`HelmClient.zoom` uses it (`encode_pinch`): two fingers move apart (zoom in) /
+together (zoom out), centered on the cursor, mapped to the scroll wheel. Each
+`x`/`y` is the same 16.16 normalized fixed point as single touch.
 
 Hardware **keys** were not in the capture, so their message format is unknown;
 the key enum is preserved in `helm/keys.py` for future work. A touchscreen unit

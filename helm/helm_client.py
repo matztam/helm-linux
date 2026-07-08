@@ -75,13 +75,29 @@ def parse_frames(buf: bytes):
         off += 8 + length
 
 
+def _fx(v: float) -> int:
+    return max(0, min(TOUCH_UNITY, int(round(v * TOUCH_UNITY))))
+
+
 def encode_touch(ctx: bytes, x: float, y: float, down: bool) -> bytes:
-    """Build a 0x164c touch payload. ``ctx`` = the 4-byte touch context id the
-    plotter assigned (0x1645). x,y normalized [0,1] from the top-left."""
-    xf = max(0, min(TOUCH_UNITY, int(x * TOUCH_UNITY)))
-    yf = max(0, min(TOUCH_UNITY, int(y * TOUCH_UNITY)))
-    # [ctx:4][u32 1][u8 0][u32 x][u32 y][u32 down][pad:3]
-    return ctx[:4] + struct.pack("<IBIII", 1, 0, xf, yf, 1 if down else 0) + b"\x00\x00\x00"
+    """Single-finger 0x164c payload (count=1, track_id 0). ``ctx`` = the
+    plotter-assigned touch context id (0x1645). x,y normalized [0,1]."""
+    return (ctx[:4] + struct.pack("<I", 1)
+            + b"\x00" + struct.pack("<II", _fx(x), _fx(y))
+            + struct.pack("<I", 1 if down else 0) + b"\x00\x00\x00")
+
+
+def encode_pinch(ctx: bytes, x0: float, y0: float, x1: float, y1: float,
+                 down: bool) -> bytes:
+    """Two-finger 0x164c payload (count=2), matching the app byte-for-byte:
+    [ctx][2] 00 [x0][y0][down0] 01 00 00 00 [x1][y1][down1] 00×9.
+    Finger track_ids are 0 and 1."""
+    d = 1 if down else 0
+    return (ctx[:4] + struct.pack("<I", 2)
+            + b"\x00" + struct.pack("<IIB", _fx(x0), _fx(y0), d)
+            + b"\x01\x00\x00\x00"
+            + struct.pack("<IIB", _fx(x1), _fx(y1), d)
+            + b"\x00" * 9)
 
 
 class HelmClient:
@@ -90,7 +106,7 @@ class HelmClient:
         self.port = port
         self.token = token or os.urandom(8)
         self.sock: socket.socket | None = None
-        self.touch_ctx: bytes | None = None  # assigned by plotter (0x1645)
+        self.touch_ctx: bytes | None = None   # plotter-assigned (0x1645)
         self._rxbuf = bytearray()
 
     @property
@@ -111,8 +127,12 @@ class HelmClient:
         self._send(T_TOKEN, self.token)
         for idx in SUBSCRIBE_INDICES:
             self._send(T_SUBSCRIBE, struct.pack("<I", idx))
-        self._send(T_ACQUIRE)                 # request a touch context
-        self.touch_ctx = self._await_context()  # read the 0x1645 reply
+        # One touch context (finger 1) for taps/drags — exactly like the app for
+        # single-finger use. A second context (finger 2, for pinch-zoom) is
+        # acquired lazily on the first zoom, so a phantom finger never interferes
+        # with normal tap/drag recognition.
+        self._send(T_ACQUIRE)
+        self.touch_ctx = self._await_context()
 
     def _await_context(self, timeout: float = 3.0):
         """Read frames until the plotter's 0x1645 assigns our touch id."""
@@ -162,6 +182,33 @@ class HelmClient:
             self.touch(*p, down=True)
         time.sleep(step_delay)
         self.touch(*pts[-1], down=False)
+
+    @property
+    def can_zoom(self) -> bool:
+        return bool(self.touch_ctx)
+
+    def zoom(self, direction: int, cx: float = 0.5, cy: float = 0.5,
+             steps: int = 8, span: float = 0.08, gap0: float = 0.04) -> None:
+        """Pinch-to-zoom centered on (cx, cy). direction > 0 zooms in (fingers
+        spread apart), < 0 zooms out (together). Two fingers move as a
+        horizontal pair, sent as count=2 pinch messages (see encode_pinch)."""
+        if not self.touch_ctx:
+            return
+        ctx = self.touch_ctx
+        gaps = [gap0 + (span - gap0) * i / (steps - 1) for i in range(steps)]
+        if direction < 0:
+            gaps.reverse()  # start apart, come together
+
+        def frame(gap, down):
+            self._send(T_TOUCH,
+                       encode_pinch(ctx, cx - gap, cy, cx + gap, cy, down))
+
+        frame(gaps[0], True)
+        for g in gaps[1:]:
+            time.sleep(0.02)
+            frame(g, True)
+        time.sleep(0.02)
+        frame(gaps[-1], False)
 
     def read(self, n: int = 4096, timeout: float = 1.0) -> bytes:
         """Read whatever the plotter sends (device info, ack, etc.)."""
