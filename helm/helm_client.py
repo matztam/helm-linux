@@ -22,6 +22,30 @@ Video (plotter -> client): a standard RTSP/H.264 stream, its URL delivered in a
 
 Prereqs: this client must be a registered bl-id (see helm.credential / `pair`)
 and the plotter's global App-permission must be View and Control.
+
+Keepalive: once a touch context is granted, the plotter expects *some*
+activity to keep flowing on this connection -- not as a requirement of the
+touch channel specifically, but as a keepalive for the whole session,
+including the separate RTSP video stream running alongside it. Without it,
+the plotter kills the video (freezes, no error surfaced) roughly 30s after
+the touch context was acquired, regardless of how healthy the RTSP
+connection itself looks. Confirmed by disabling the keepalive entirely
+against a real plotter.
+
+What to send as that activity matters: a synthetic no-op touch frame
+(0x164c) was tried first and does keep the session alive, but the plotter
+tracks a "last touch position" across the whole session including these
+synthetic frames -- so a keepalive frame sent shortly before a real tap can
+make that tap register as the tail end of a drag instead of a clean press,
+requiring a second tap at the same spot to register. Capturing the real
+ActiveCaptain app with PCAPdroid while idle (screen untouched) for 65+
+continuous seconds showed it sends zero 0x164c frames in that time, but
+exactly three 0x1648 (T_SUBSCRIBE) frames -- re-subscribing to indices
+8, 10, 6 (already part of SUBSCRIBE_INDICES above) -- every 5.000s
+precisely (13/13 bursts measured, zero drift). HelmClient.start_keepalive()
+replays that instead: being a different frame type than touch entirely, it
+can't interact with touch/cursor state at all, so it has none of the
+synthetic-touch approach's side effects.
 """
 
 from __future__ import annotations
@@ -29,6 +53,7 @@ from __future__ import annotations
 import os
 import socket
 import struct
+import threading
 import time
 
 HELM_PORT = 51200
@@ -100,6 +125,13 @@ def encode_pinch(ctx: bytes, x0: float, y0: float, x1: float, y1: float,
             + b"\x00" * 9)
 
 
+# Indices the real ActiveCaptain app re-subscribes to every 5s as its
+# keepalive (see the module docstring). Order matches the capture exactly,
+# though nothing suggests it matters.
+KEEPALIVE_SUBSCRIBE_INDICES = [8, 10, 6]
+KEEPALIVE_INTERVAL = 5.0  # seconds
+
+
 class HelmClient:
     def __init__(self, host: str, port: int = HELM_PORT, token: bytes | None = None):
         self.host = host
@@ -108,6 +140,9 @@ class HelmClient:
         self.sock: socket.socket | None = None
         self.touch_ctx: bytes | None = None   # plotter-assigned (0x1645)
         self._rxbuf = bytearray()
+        self._send_lock = threading.Lock()  # _send() from both the caller's
+                                             # thread and the keepalive timer
+        self._keepalive_timer: threading.Timer | None = None
 
     @property
     def rtsp_url(self) -> str:
@@ -120,7 +155,8 @@ class HelmClient:
 
     def _send(self, mtype: int, payload: bytes = b"") -> None:
         assert self.sock is not None, "not connected"
-        self.sock.sendall(_frame(mtype, payload))
+        with self._send_lock:
+            self.sock.sendall(_frame(mtype, payload))
 
     def _handshake(self) -> None:
         self._send(T_HELLO, struct.pack("<H", HELLO_TAG))
@@ -133,6 +169,36 @@ class HelmClient:
         # with normal tap/drag recognition.
         self._send(T_ACQUIRE)
         self.touch_ctx = self._await_context()
+        if self.touch_ctx:
+            self.start_keepalive()
+
+    def start_keepalive(self) -> None:
+        """Starts the periodic tSubscribe keepalive (see the module
+        docstring for why). Called automatically once a touch context is
+        granted; only needed to call directly if you build a HelmClient
+        without going through connect()/_handshake()."""
+        self._schedule_keepalive_tick()
+
+    def _schedule_keepalive_tick(self) -> None:
+        timer = threading.Timer(KEEPALIVE_INTERVAL, self._keepalive_tick)
+        timer.daemon = True
+        self._keepalive_timer = timer
+        timer.start()
+
+    def _keepalive_tick(self) -> None:
+        if self.sock is None:
+            return
+        try:
+            for idx in KEEPALIVE_SUBSCRIBE_INDICES:
+                self._send(T_SUBSCRIBE, struct.pack("<I", idx))
+        except OSError:
+            return  # connection's gone; close()/a reconnect will clean up
+        self._schedule_keepalive_tick()
+
+    def stop_keepalive(self) -> None:
+        if self._keepalive_timer is not None:
+            self._keepalive_timer.cancel()
+            self._keepalive_timer = None
 
     def _await_context(self, timeout: float = 3.0):
         """Read frames until the plotter's 0x1645 assigns our touch id."""
@@ -222,6 +288,7 @@ class HelmClient:
             return b""
 
     def close(self) -> None:
+        self.stop_keepalive()
         if self.sock:
             try:
                 self.sock.close()

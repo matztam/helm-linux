@@ -78,6 +78,30 @@ The plotter replies `0x1645` = `[u32 1][u32 ctx_id]`. **`ctx_id` must be used as
 the first 4 bytes of every touch message** — it is assigned by the plotter, not
 chosen by the client.
 
+### Keepalive
+
+Once a touch context is granted, the plotter expects *some* activity to keep
+flowing on this connection, or it kills the session (the RTSP video freezes,
+with no error surfaced on this connection or the video one) roughly 30s
+after the context was acquired — confirmed by disabling all activity and
+watching the video die on schedule.
+
+A synthetic no-op touch frame (`0x164c`, `down=0`) was tried first and does
+keep the session alive, but it's the wrong choice: the plotter tracks a
+"last touch position" across the *whole* session, including these synthetic
+frames, so a keepalive frame sent shortly before a real tap can make that
+tap register as the tail end of a drag instead of a clean press (needing a
+second tap at the same spot to actually register).
+
+What the real app itself sends instead, confirmed with a targeted capture
+(idle/untouched for 65+ continuous seconds): **zero** `0x164c` frames, but
+exactly three `0x1648` (subscribe) frames — re-subscribing to indices
+`8, 10, 6` (already part of the initial subscription list above) — every
+**5.000s** precisely (13/13 bursts measured, zero drift). Being a different
+frame type than touch entirely, it can't interact with touch/cursor state at
+all, so it has none of the synthetic-touch approach's side effects.
+Implemented in `HelmClient.start_keepalive()`/`_keepalive_tick()`.
+
 ### Plotter → client
 
 `0x1649` events wrap `[u32 subtype][u32 length][data]`: subtype 0 = the RTSP
